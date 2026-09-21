@@ -1,254 +1,345 @@
-#!/usr/bin/env python3
 """
-快速修复棋子识别问题
+Chess Bot - 国际象棋机器人
+修复版：解决自动识别和坐标计算问题
 """
 
 import cv2
 import numpy as np
 import pyautogui
-import mss
 import chess
-from pathlib import Path
+import chess.engine
+import tkinter as tk
+from tkinter import ttk, messagebox
+import threading
+import time
+import json
+import os
+from datetime import datetime
 import sys
 
+# 修复1: 使用正确的mss导入
+try:
+    import mss
 
-class QuickFixBot:
-    """快速修复版本 - 使用宽松的识别阈值"""
+    MSS_CLASS = mss.MSS  # 使用新的类名
+except:
+    MSS_CLASS = None
 
+
+class ChessBot:
     def __init__(self):
-        self.screen_capturer = mss.mss()
+        # 修复2: 初始化时添加错误处理和默认值
+        self.screen_capturer = None
+        if MSS_CLASS:
+            try:
+                self.screen_capturer = MSS_CLASS()
+            except Exception as e:
+                print(f"初始化屏幕捕获失败: {e}")
+
         self.board_region = None
-        self.square_size = None
+        self.is_running = False
+        self.engine = None
+        self.board = chess.Board()
+        self.square_size = 0
+        self.debug_mode = True  # 调试模式
 
-    def set_board_region(self, x1, y1, x2, y2):
-        """设置棋盘区域"""
-        self.board_region = {"top": y1, "left": x1, "width": x2 - x1, "height": y2 - y1}
-        self.square_size = ((x2 - x1) // 8, (y2 - y1) // 8)
-        print(f"✓ 棋盘区域设置完成: ({x1}, {y1}) -> ({x2}, {y2})")
-        print(f"✓ 格子大小: {self.square_size}")
+    def capture_screen(self, region=None):
+        """截取屏幕区域"""
+        try:
+            if region:
+                # 修复3: 确保区域参数有效
+                region = self.validate_region(region)
+                if not region:
+                    return None
 
-    def capture_square(self, rank, file):
-        """捕获单个格子"""
-        screenshot = self.screen_capturer.grab(self.board_region)
-        board_img = np.array(screenshot)
-        board_img = cv2.cvtColor(board_img, cv2.COLOR_BGRA2BGR)
+                screenshot = pyautogui.screenshot(region=(
+                    region['left'],
+                    region['top'],
+                    region['width'],
+                    region['height']
+                ))
+            else:
+                screenshot = pyautogui.screenshot()
 
-        square_w, square_h = self.square_size
-        y = (7 - rank) * square_h
-        x = file * square_w
-
-        return board_img[y:y + square_h, x:x + square_w]
-
-    def recognize_piece_v2(self, square_img):
-        """
-        改进的识别方法 - 使用宽松的阈值
-        """
-        gray = cv2.cvtColor(square_img, cv2.COLOR_BGR2GRAY)
-        h, w = gray.shape
-
-        # 获取多个区域（更灵活）
-        regions = {
-            'center': gray[h//3:2*h//3, w//3:2*w//3],  # 中心1/3
-            'whole': gray[h//4:3*h//4, w//4:3*w//4],   # 中心1/2
-        }
-
-        # 多种检测方法
-        detection_scores = []
-
-        for region_name, region in regions.items():
-            mean_val = np.mean(region)
-            std_dev = np.std(region)
-
-            # 检测1：标准差（宽松阈值）
-            score1 = 1 if std_dev > 8 else 0  # 从30降到8
-
-            # 检测2：亮度范围（更宽松）
-            min_val = np.min(region)
-            max_val = np.max(region)
-            score2 = 1 if (max_val - min_val) > 15 else 0  # 从25降到15
-
-            # 检测3：边缘检测（更敏感）
-            edges = cv2.Canny(region, 30, 80)  # 降低阈值
-            edge_pixels = np.sum(edges > 0)
-            edge_ratio = edge_pixels / region.size
-            score3 = 1 if edge_ratio > 0.02 else 0  # 从0.05降到0.02
-
-            detection_scores.append(score1 + score2 + score3)
-
-        # 综合判断（至少2种方法检测到棋子）
-        total_score = sum(detection_scores)
-        has_piece = total_score >= 4  # 6分中至少4分
-
-        if not has_piece:
+            return cv2.cvtColor(np.array(screenshot), cv2.COLOR_RGB2BGR)
+        except Exception as e:
+            print(f"截图失败: {e}")
             return None
 
-        # 识别颜色
-        center_mean = np.mean(regions['center'])
-        is_white_piece = center_mean > 128
+    def validate_region(self, region):
+        """修复4: 验证并修正区域坐标"""
+        if not region:
+            return None
 
-        # 识别棋子类型（简化版，但更准确）
-        # 使用轮廓分析
-        edges = cv2.Canny(regions['whole'], 50, 120)
-        contours, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        try:
+            left = int(region.get('left', 0))
+            top = int(region.get('top', 0))
+            width = int(region.get('width', 0))
+            height = int(region.get('height', 0))
 
-        if len(contours) == 0:
-            # 有棋子但没检测到轮廓，可能是兵
-            return 'P' if is_white_piece else 'p'
+            # 确保宽度和高度为正数
+            if width < 0:
+                left = left + width
+                width = abs(width)
+            if height < 0:
+                top = top + height
+                height = abs(height)
 
-        # 获取最大轮廓
-        max_contour = max(contours, key=cv2.contourArea)
-        area = cv2.contourArea(max_contour)
-        perimeter = cv2.arcLength(max_contour, True)
+            # 确保最小尺寸
+            width = max(width, 100)
+            height = max(height, 100)
 
-        # 计算特征
-        area_ratio = area / regions['whole'].size
-        circularity = 4 * np.pi * area / (perimeter * perimeter) if perimeter > 0 else 0
+            return {
+                'left': left,
+                'top': top,
+                'width': width,
+                'height': height
+            }
+        except Exception as e:
+            print(f"区域验证失败: {e}")
+            return None
 
-        # 改进的分类逻辑
-        if area_ratio > 0.4:
-            # 大面积：可能是后或王
-            if circularity > 0.6:
-                return 'Q' if is_white_piece else 'q'
-            else:
-                return 'K' if is_white_piece else 'k'
-        elif area_ratio > 0.25:
-            # 中等面积：可能是车或象
-            if circularity < 0.4:
-                return 'R' if is_white_piece else 'r'
-            else:
-                return 'B' if is_white_piece else 'b'
-        else:
-            # 小面积：可能是马或兵
-            if circularity > 0.5:
-                return 'P' if is_white_piece else 'p'
-            else:
-                return 'N' if is_white_piece else 'n'
+    def detect_board(self, image=None):
+        """修复5: 改进棋盘检测逻辑"""
+        if image is None:
+            image = self.capture_screen()
 
-    def scan_board(self):
-        """扫描整个棋盘"""
-        print("\n=== 开始扫描棋盘 ===")
+        if image is None:
+            return None
 
-        board = chess.Board()
-        board.clear()
+        try:
+            # 转换为灰度图
+            gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
 
-        recognized_count = 0
-        empty_count = 0
+            # 使用边缘检测
+            edges = cv2.Canny(gray, 50, 150)
 
-        for rank in range(8):
-            for file in range(8):
-                square_idx = rank * 8 + file
-                square_name = chess.SQUARE_NAMES[square_idx]
+            # 查找轮廓
+            contours, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
-                square_img = self.capture_square(rank, file)
-                piece = self.recognize_piece_v2(square_img)
+            # 寻找最大的矩形（假设是棋盘）
+            best_rect = None
+            best_area = 0
 
-                if piece:
-                    piece_obj = chess.Piece.from_symbol(piece)
-                    board.set_piece_at(square_idx, piece_obj)
-                    print(f"  ✓ {square_name}: {piece}")
-                    recognized_count += 1
-                else:
-                    empty_count += 1
-                    if empty_count <= 3:  # 只显示前3个空格子
-                        print(f"  ✗ {square_name}: 空")
+            for contour in contours:
+                x, y, w, h = cv2.boundingRect(contour)
+                area = w * h
 
-        print(f"\n识别结果: {recognized_count} 个棋子, {empty_count} 个空格子")
-        print("\n当前棋局:")
-        print(board)
+                # 检查是否是正方形（棋盘应该是正方形）
+                if area > best_area and w > 200 and h > 200:
+                    aspect_ratio = w / float(h)
+                    if 0.8 <= aspect_ratio <= 1.2:  # 接近正方形
+                        best_area = area
+                        best_rect = (x, y, w, h)
 
-        return board
+            if best_rect:
+                x, y, w, h = best_rect
+                self.board_region = {
+                    'left': x,
+                    'top': y,
+                    'width': w,
+                    'height': h
+                }
+                self.square_size = w // 8
+                return self.board_region
 
-    def save_calibration(self, filepath="calibration_v2.pkl"):
-        """保存校准数据"""
-        import pickle
-        calibration_data = {
-            "board_region": self.board_region,
-            "square_size": self.square_size
+        except Exception as e:
+            print(f"棋盘检测失败: {e}")
+
+        return None
+
+    def manual_select_board(self):
+        """手动选择棋盘区域"""
+        print("\n请手动选择棋盘区域...")
+        print("将鼠标移到棋盘左上角，按 Enter 确认")
+        input()
+        x1, y1 = pyautogui.position()
+
+        print("将鼠标移到棋盘右下角，按 Enter 确认")
+        input()
+        x2, y2 = pyautogui.position()
+
+        # 修复6: 确保坐标顺序正确
+        left = min(x1, x2)
+        top = min(y1, y2)
+        width = abs(x2 - x1)
+        height = abs(y2 - y1)
+
+        self.board_region = {
+            'left': left,
+            'top': top,
+            'width': width,
+            'height': height
         }
-        with open(filepath, 'wb') as f:
-            pickle.dump(calibration_data, f)
-        print(f"✓ 校准数据已保存: {filepath}")
+        self.square_size = width // 8
+
+        print(f"已选择区域: {self.board_region}")
+        return self.board_region
+
+    def get_square_position(self, square_name):
+        """获取棋格在屏幕上的位置"""
+        if not self.board_region:
+            return None
+
+        # 转换棋格名称到坐标 (如 'e2' -> (4, 1))
+        file = ord(square_name[0]) - ord('a')
+        rank = int(square_name[1]) - 1
+
+        # 修复7: 处理棋盘方向（假设白方在下方）
+        x = self.board_region['left'] + file * self.square_size + self.square_size // 2
+        y = self.board_region['top'] + (7 - rank) * self.square_size + self.square_size // 2
+
+        return (x, y)
+
+    def make_move(self, move_uci):
+        """执行移动"""
+        try:
+            move = chess.Move.from_uci(move_uci)
+            from_square = chess.square_name(move.from_square)
+            to_square = chess.square_name(move.to_square)
+
+            from_pos = self.get_square_position(from_square)
+            to_pos = self.get_square_position(to_square)
+
+            if from_pos and to_pos:
+                # 点击起始位置
+                pyautogui.click(from_pos[0], from_pos[1])
+                time.sleep(0.1)
+
+                # 点击目标位置
+                pyautogui.click(to_pos[0], to_pos[1])
+                time.sleep(0.1)
+
+                return True
+        except Exception as e:
+            print(f"执行移动失败: {e}")
+
+        return False
+
+    def analyze_position(self, fen=None):
+        """分析当前局面"""
+        if self.engine:
+            try:
+                if fen:
+                    board = chess.Board(fen)
+                else:
+                    board = self.board
+
+                result = self.engine.analyse(board, chess.engine.Limit(time=0.1))
+                return result
+            except Exception as e:
+                print(f"分析失败: {e}")
+
+        return None
+
+    def get_best_move(self, fen=None):
+        """获取最佳移动"""
+        if self.engine:
+            try:
+                if fen:
+                    board = chess.Board(fen)
+                else:
+                    board = self.board
+
+                result = self.engine.play(board, chess.engine.Limit(time=0.5))
+                return result.move
+            except Exception as e:
+                print(f"获取最佳移动失败: {e}")
+
+        return None
+
+    def save_config(self, filename='chess_bot_config.json'):
+        """保存配置"""
+        config = {
+            'board_region': self.board_region,
+            'square_size': self.square_size
+        }
+        try:
+            with open(filename, 'w') as f:
+                json.dump(config, f)
+            print(f"配置已保存到 {filename}")
+        except Exception as e:
+            print(f"保存配置失败: {e}")
+
+    def load_config(self, filename='chess_bot_config.json'):
+        """加载配置"""
+        try:
+            if os.path.exists(filename):
+                with open(filename, 'r') as f:
+                    config = json.load(f)
+                self.board_region = config.get('board_region')
+                self.square_size = config.get('square_size', 0)
+                print(f"配置已从 {filename} 加载")
+                return True
+        except Exception as e:
+            print(f"加载配置失败: {e}")
+
+        return False
+
+    def run(self):
+        """主运行循环"""
+        print("=== 国际象棋机器人启动 ===\n")
+
+        # 尝试加载配置
+        if not self.load_config():
+            print("未找到配置文件，需要重新识别棋盘\n")
+
+        # 选择模式
+        print("请选择模式:")
+        print("1. 自动识别屏幕棋盘（默认）")
+        print("2. 手动框选棋盘区域")
+
+        try:
+            mode = input("\n请选择 (1/2, 默认1): ").strip() or "1"
+
+            if mode == "1":
+                print("\n=== 识别棋盘 ===")
+                print("正在识别屏幕棋盘...")
+
+                # 给用户时间切换到棋盘窗口
+                print("请在3秒内切换到棋盘窗口...")
+                time.sleep(3)
+
+                region = self.detect_board()
+                if region:
+                    print(f"识别成功: {region}")
+                else:
+                    print("自动识别失败，切换到手动输入模式...")
+                    self.manual_select_board()
+
+            elif mode == "2":
+                self.manual_select_board()
+            else:
+                print("无效选择")
+                return
+
+        except KeyboardInterrupt:
+            print("\n操作已取消")
+            return
+        except Exception as e:
+            print(f"错误: {e}")
+            return
+
+        # 保存配置
+        self.save_config()
+
+        print("\n=== 准备就绪 ===")
+        print(f"棋盘区域: {self.board_region}")
+        print(f"格子大小: {self.square_size}")
+        print("\n按 Ctrl+C 停止")
+
+        try:
+            while True:
+                time.sleep(1)
+        except KeyboardInterrupt:
+            print("\n\n机器人已停止")
 
 
 def main():
-    """主程序"""
-    print("=" * 70)
-    print("  快速修复 - 棋子识别改进版")
-    print("=" * 70)
-    print("\n改进点:")
-    print("  1. ✓ 降低识别阈值，更容易检测到棋子")
-    print("  2. ✓ 使用多种检测方法，提高准确率")
-    print("  3. ✓ 改进棋子分类逻辑")
-    print("  4. ✓ 保存校准数据，下次使用")
-    print("=" * 70)
-
-    bot = QuickFixBot()
-
-    # 检查是否有保存的校准
-    calib_file = Path(__file__).parent / "calibration_v2.pkl"
-    if calib_file.exists():
-        import pickle
-        with open(calib_file, 'rb') as f:
-            data = pickle.load(f)
-        bot.board_region = data["board_region"]
-        bot.square_size = data["square_size"]
-        print(f"\n✓ 已加载校准数据: {calib_file}")
-    else:
-        print("\n=== 棋盘校准 ===")
-        print("1. 请点击棋盘左上角...")
-        input("按Enter后点击左上角，然后按Enter继续...")
-
-        x1, y1 = pyautogui.position()
-        print(f"  左上角: ({x1}, {y1})")
-
-        print("2. 请点击棋盘右下角...")
-        input("按Enter后点击右下角，然后按Enter继续...")
-
-        x2, y2 = pyautogui.position()
-        print(f"  右下角: ({x2}, {y2})")
-
-        bot.set_board_region(x1, y1, x2, y2)
-        bot.save_calibration()
-
-    # 测试识别
-    print("\n=== 测试识别 ===")
-    try:
-        board = bot.scan_board()
-
-        print("\n=== 识别结果验证 ===")
-        print(f"棋子总数: {len(list(board.piece_map().keys()))}")
-
-        # 保存识别结果
-        output_file = Path(__file__).parent / "recognized_fen.txt"
-        with open(output_file, 'w') as f:
-            f.write(board.fen())
-        print(f"\n✓ FEN字符串已保存: {output_file}")
-        print(f"  FEN: {board.fen()}")
-
-    except Exception as e:
-        print(f"\n❌ 识别失败: {e}")
-        import traceback
-        traceback.print_exc()
-        return
-
-    print("\n" + "=" * 70)
-    print("  完成！")
-    print("=" * 70)
-    print("\n提示:")
-    print("  1. 如果识别还不准确，请检查:")
-    print("     - 棋盘是否完全可见")
-    print("     - 光线是否充足")
-    print("     - 棋子样式是否清晰")
-    print("  2. 仍然识别不准？建议使用FEN手动输入模式")
-    print("  3. 或者训练一个神经网络模型（需要大量标注数据）")
+    """主函数"""
+    bot = ChessBot()
+    bot.run()
 
 
 if __name__ == "__main__":
-    try:
-        main()
-    except KeyboardInterrupt:
-        print("\n\n程序已停止")
-    except Exception as e:
-        print(f"\n\n程序出错: {e}")
-        import traceback
-        traceback.print_exc()
+    main()

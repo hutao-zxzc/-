@@ -1,770 +1,480 @@
-#!/usr/bin/env python3
 """
-国际象棋自动对弈机器人
-功能：自动识别屏幕棋盘，与AI进行对弈
+Chess Bot - 全自动国际象棋机器人 (Stockfish 19 版)
+功能：
+1. 自动识别棋盘位置和状态
+2. 自动检测对手移动
+3. Stockfish 19 AI自动计算并执行移动
 """
 
 import cv2
 import numpy as np
 import pyautogui
-import mss
 import chess
+import chess.engine
 import time
-import sys
-from pathlib import Path
-from typing import Optional, Tuple, Dict
-import pickle
+import os
 
-# 禁用pyautogui的安全机制
-pyautogui.FAILSAFE = False
-
+# 使用mss截图（更稳定）
+try:
+    import mss
+    MSS_AVAILABLE = True
+except ImportError:
+    MSS_AVAILABLE = False
+    print("警告: 未安装mss，尝试使用pyautogui")
+    print("建议运行: pip install mss")
 
 class ChessBot:
-    """国际象棋自动对弈机器人"""
-
-    def __init__(self, engine_path: str = None):
-        """
-        初始化棋盘机器人
-
-        Args:
-            engine_path: 国际象棋引擎路径（默认为LCZero）
-        """
-        self.screen_capturer = mss.mss()
-        self.board_state = chess.Board()
-
-        # 自动检测引擎路径
-        if engine_path is None:
-            # Windows环境下查找lc0.exe
-            if sys.platform == "win32":
-                # 先查找同目录下的lc0.exe
-                script_dir = Path(__file__).parent
-                local_lc0 = script_dir / "lc0.exe"
-                if local_lc0.exists():
-                    engine_path = str(local_lc0)
-                else:
-                    # 使用PATH中的lc0
-                    engine_path = "lc0"
-            else:
-                # Linux/Mac环境
-                engine_path = "lc0"
-
-        self.engine_path = engine_path
-        self.stockfish_path = engine_path  # 保持向后兼容
-        print(f"引擎路径: {self.engine_path}")
-
-        # 棋盘区域（左上角和右下角坐标）
+    def __init__(self):
         self.board_region = None
-        self.board_size = None
+        self.square_size = 0
+        self.board = chess.Board()
+        self.previous_board_image = None
+        self.player_color = chess.WHITE
+        self.sct = None
+        self.engine = None
 
-        # 棋盘格子大小
-        self.square_size = None
+        # Stockfish 路径
+        self.stockfish_path = r"C:\Users\12991\Desktop\stockfish\stockfish-windows-x86-64-universal.exe"
 
-        # 棋子模板（用于识别）
-        self.piece_templates = {}
+        if MSS_AVAILABLE:
+            try:
+                self.sct = mss.mss()
+            except:
+                self.sct = None
 
-    def set_board_region(self, x1: int, y1: int, x2: int, y2: int):
-        """
-        设置棋盘区域
+    def init_engine(self):
+        """初始化 Stockfish 引擎"""
+        try:
+            if os.path.exists(self.stockfish_path):
+                self.engine = chess.engine.SimpleEngine.popen_uci(self.stockfish_path)
+                print(f"✓ Stockfish 引擎已加载")
 
-        Args:
-            x1, y1: 左上角坐标
-            x2, y2: 右下角坐标
-        """
-        self.board_region = {"top": y1, "left": x1, "width": x2 - x1, "height": y2 - y1}
-        self.board_size = (x2 - x1, y2 - y1)
-        self.square_size = (x2 - x1) // 8, (y2 - y1) // 8
-        print(f"棋盘区域设置完成: {self.board_region}")
-        print(f"格子大小: {self.square_size}")
-
-    def capture_board(self) -> np.ndarray:
-        """
-        捕获棋盘区域
-
-        Returns:
-            棋盘图像 (numpy数组)
-        """
-        if not self.board_region:
-            raise ValueError("请先设置棋盘区域")
-
-        screenshot = self.screen_capturer.grab(self.board_region)
-        img = np.array(screenshot)
-        img = cv2.cvtColor(img, cv2.COLOR_BGRA2BGR)
-        return img
-
-    def detect_board_automatically(self) -> bool:
-        """
-        自动检测棋盘位置（通过寻找棋盘网格）
-
-        Returns:
-            是否成功检测到棋盘
-        """
-        print("正在自动检测棋盘...")
-
-        # 获取整个屏幕
-        screen = pyautogui.screenshot()
-        screen_np = np.array(screen)
-        screen_np = cv2.cvtColor(screen_np, cv2.COLOR_RGB2BGR)
-
-        # 转换为灰度图
-        gray = cv2.cvtColor(screen_np, cv2.COLOR_BGR2GRAY)
-
-        # 使用Hough变换检测直线（棋盘线）
-        edges = cv2.Canny(gray, 50, 150, apertureSize=3)
-        lines = cv2.HoughLines(edges, 1, np.pi / 180, threshold=200)
-
-        if lines is None or len(lines) < 8:
-            print("未能检测到足够的棋盘线，请手动设置棋盘区域")
-            return False
-
-        # 提取水平和垂直线
-        horizontal_lines = []
-        vertical_lines = []
-
-        for line in lines:
-            rho, theta = line[0]
-            if abs(theta) < 0.1 or abs(theta - np.pi) < 0.1:
-                horizontal_lines.append(rho)
-            elif abs(theta - np.pi / 2) < 0.1:
-                vertical_lines.append(rho)
-
-        if len(horizontal_lines) < 8 or len(vertical_lines) < 8:
-            print("未能检测到完整的棋盘网格")
-            return False
-
-        # 找到棋盘边界
-        horizontal_lines.sort()
-        vertical_lines.sort()
-
-        x1 = int(vertical_lines[0])
-        x2 = int(vertical_lines[-1])
-        y1 = int(horizontal_lines[0])
-        y2 = int(horizontal_lines[-1])
-
-        # 扩展边界以包含整个棋盘
-        padding = 50
-        x1 = max(0, x1 - padding)
-        y1 = max(0, y1 - padding)
-        x2 = min(screen_np.shape[1], x2 + padding)
-        y2 = min(screen_np.shape[0], y2 + padding)
-
-        self.set_board_region(x1, y1, x2, y2)
-        return True
-
-    def extract_squares(self, board_img: np.ndarray) -> Dict[Tuple[int, int], np.ndarray]:
-        """
-        提取棋盘上的所有格子
-
-        Args:
-            board_img: 棋盘图像
-
-        Returns:
-            字典，键是格子坐标(rank, file)，值是格子图像
-        """
-        squares = {}
-        square_w, square_h = self.square_size
-
-        for rank in range(8):  # 0-7, 从下到上
-            for file in range(8):  # 0-7, 从左到右
-                # 在图像中，y坐标从上到下
-                y = (7 - rank) * square_h
-                x = file * square_w
-
-                square = board_img[y:y + square_h, x:x + square_w]
-                squares[(rank, file)] = square
-
-        return squares
-
-    def recognize_piece(self, square_img: np.ndarray) -> Optional[str]:
-        """
-        识别格子上的棋子
-
-        Args:
-            square_img: 格子图像
-
-        Returns:
-            棋子符号（如 'P', 'N', 'B', 'R', 'Q', 'K' 或 None）
-        """
-        # 转换为灰度图
-        gray = cv2.cvtColor(square_img, cv2.COLOR_BGR2GRAY)
-
-        # 简单的模板匹配识别（可以替换为机器学习模型）
-        # 这里使用基于颜色和轮廓的简单识别方法
-
-        # 获取格子中心区域（避免边缘干扰）
-        h, w = gray.shape
-        center_region = gray[h//4:3*h//4, w//4:3*w//4]
-
-        # 检测是否有棋子（通过阈值分割）
-        _, binary = cv2.threshold(center_region, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-
-        # 计算白色和黑色像素的比例
-        white_pixels = np.sum(binary == 255)
-        black_pixels = np.sum(binary == 0)
-        total = white_pixels + black_pixels
-
-        if black_pixels / total < 0.1:  # 空格子
-            return None
-
-        # 识别棋子颜色（深色还是浅色）
-        mean_color = np.mean(center_region)
-        is_white_piece = mean_color > 128
-
-        # 识别棋子类型（简化的方法）
-        # 在实际应用中，应该使用训练好的神经网络
-        # 这里返回占位符，需要用户输入或使用更复杂的识别方法
-        return "UNKNOWN"
-
-    def scan_board(self) -> chess.Board:
-        """
-        扫描整个棋盘，识别棋局状态
-
-        Returns:
-            chess.Board对象，表示当前棋局状态
-        """
-        board_img = self.capture_board()
-        squares = self.extract_squares(board_img)
-
-        # 创建新的棋盘
-        board = chess.Board()
-        board.clear()
-
-        # TODO: 这里需要实现完整的棋子识别
-        # 由于棋子识别比较复杂，建议使用以下方法之一：
-        # 1. 使用预训练的神经网络模型
-        # 2. 手动输入棋局状态
-        # 3. 使用在线棋盘API
-
-        print("提示：棋子识别功能需要进一步的机器学习模型支持")
-        print("当前使用简单的颜色识别，可能不够准确")
-
-        return board
-
-    def recognize_piece_enhanced(self, square_img: np.ndarray) -> Optional[str]:
-        """
-        增强的棋子识别方法
-
-        Args:
-            square_img: 格子图像
-
-        Returns:
-            棋子符号
-        """
-        # 转换为灰度图
-        gray = cv2.cvtColor(square_img, cv2.COLOR_BGR2GRAY)
-
-        # 获取中心区域（避免边缘干扰）
-        h, w = gray.shape
-        center_region = gray[h//4:3*h//4, w//4:3*w//4]
-
-        # 计算标准差（检测是否有棋子）
-        std_dev = np.std(center_region)
-        mean_val = np.mean(center_region)
-
-        # 如果标准差很小，可能是空格子
-        if std_dev < 20:
-            return None
-
-        # 检测棋子颜色
-        is_white_piece = mean_val > 128
-
-        # 使用边缘检测和轮廓分析
-        edges = cv2.Canny(center_region, 50, 150)
-        contours, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-
-        if len(contours) == 0:
-            return None
-
-        # 获取最大轮廓
-        max_contour = max(contours, key=cv2.contourArea)
-        area = cv2.contourArea(max_contour)
-
-        # 计算轮廓的周长
-        perimeter = cv2.arcLength(max_contour, True)
-
-        # 计算圆形度
-        if perimeter > 0:
-            circularity = 4 * np.pi * area / (perimeter * perimeter)
-        else:
-            circularity = 0
-
-        # 计算矩形的宽高比
-        x, y, w_rect, h_rect = cv2.boundingRect(max_contour)
-        aspect_ratio = w_rect / h_rect if h_rect > 0 else 0
-
-        # 根据特征识别棋子类型
-        piece_type = self._classify_piece(area, circularity, aspect_ratio, is_white_piece)
-
-        return piece_type
-
-    def _classify_piece(self, area: int, circularity: float,
-                      aspect_ratio: float, is_white_piece: bool) -> Optional[str]:
-        """
-        根据特征分类棋子
-
-        Args:
-            area: 轮廓面积
-            circularity: 圆形度
-            aspect_ratio: 宽高比
-            is_white_piece: 是否为白棋
-
-        Returns:
-            棋子符号
-        """
-        # 标准化面积（相对格子大小）
-        max_area = 50 * 50  # 假设中心区域最大50x50
-        area_ratio = area / max_area
-
-        # 阈值设置
-        if area_ratio < 0.1:
-            return None  # 可能是噪声
-
-        # 棋子类型识别逻辑
-        if circularity > 0.7:  # 比较圆形
-            if area_ratio > 0.4:
-                return 'Q' if is_white_piece else 'q'  # 后
+                # 设置引擎参数（可选）
+                self.engine.configure({
+                    "Hash": 128,  # 使用128MB哈希表
+                    "Threads": 4   # 使用4线程
+                })
+                return True
             else:
-                return 'P' if is_white_piece else 'p'  # 兵（顶部比较圆）
-        else:
-            if circularity < 0.3:  # 比较不规则
-                if aspect_ratio > 0.7 and aspect_ratio < 1.3:
-                    return 'R' if is_white_piece else 'r'  # 车
+                print(f"✗ Stockfish 路径不存在: {self.stockfish_path}")
+                print("将使用随机AI")
+                return False
+        except Exception as e:
+            print(f"✗ 加载 Stockfish 失败: {e}")
+            print("将使用随机AI")
+            return False
+
+    def capture_screen(self, region=None):
+        """截取屏幕区域"""
+        try:
+            if MSS_AVAILABLE and self.sct:
+                if region:
+                    region = self.validate_region(region)
+                    if not region:
+                        return None
+                    monitor = {
+                        "left": region['left'],
+                        "top": region['top'],
+                        "width": region['width'],
+                        "height": region['height']
+                    }
                 else:
-                    return 'B' if is_white_piece else 'b'  # 象（对角线形状）
+                    monitor = self.sct.monitors[1]
+
+                screenshot = self.sct.grab(monitor)
+                img = np.array(screenshot)
+                return cv2.cvtColor(img, cv2.COLOR_BGRA2BGR)
             else:
-                return 'N' if is_white_piece else 'n'  # 马（马头形状）
-
-    def scan_board_advanced(self) -> chess.Board:
-        """
-        高级棋盘扫描
-
-        Returns:
-            识别的棋盘状态
-        """
-        print("\n正在扫描棋盘...")
-        board_img = self.capture_board()
-        squares = self.extract_squares(board_img)
-
-        # 创建棋盘
-        board = chess.Board()
-        board.clear()
-
-        # 识别每个格子
-        recognized_pieces = []
-        for rank in range(8):
-            for file in range(8):
-                square_idx = rank * 8 + file
-                square_img = squares[(rank, file)]
-
-                piece = self.recognize_piece_enhanced(square_img)
-
-                if piece:
-                    # 设置棋子
-                    piece_obj = chess.Piece.from_symbol(piece)
-                    board.set_piece_at(square_idx, piece_obj)
-                    recognized_pieces.append(f"{piece} at {chess.SQUARE_NAMES[square_idx]}")
-
-        print(f"识别到 {len(recognized_pieces)} 个棋子:")
-        for p in recognized_pieces[:8]:  # 只显示前8个
-            print(f"  {p}")
-
-        # 验证棋盘状态
-        try:
-            # 检查棋盘是否有效
-            if len(recognized_pieces) > 0:
-                # 尝试检查合法性
-                if board.is_check():
-                    print("提示：检测到将军状态")
-
-            return board
+                if region:
+                    region = self.validate_region(region)
+                    if not region:
+                        return None
+                    screenshot = pyautogui.screenshot(region=(
+                        region['left'], region['top'],
+                        region['width'], region['height']
+                    ))
+                else:
+                    screenshot = pyautogui.screenshot()
+                return cv2.cvtColor(np.array(screenshot), cv2.COLOR_RGB2BGR)
         except Exception as e:
-            print(f"棋盘状态验证失败: {e}")
-            return board
+            print(f"截图失败: {e}")
+            return None
 
-    def calculate_best_move(self, board: chess.Board, depth: int = 10) -> Optional[chess.Move]:
-        """
-        使用LCZero引擎计算最佳走法
-
-        Args:
-            board: 当前棋盘状态
-            depth: 搜索深度（LCZero使用nodes数）
-
-        Returns:
-            最佳走法
-        """
+    def validate_region(self, region):
+        """验证并修正区域坐标"""
+        if not region:
+            return None
         try:
-            import chess.engine
+            left = max(int(region.get('left', 0)), 0)
+            top = max(int(region.get('top', 0)), 0)
+            width = abs(int(region.get('width', 0)))
+            height = abs(int(region.get('height', 0)))
+            width = max(width, 100)
+            height = max(height, 100)
+            return {'left': left, 'top': top, 'width': width, 'height': height}
+        except:
+            return None
 
-            # 检查引擎文件是否存在
-            engine_file = Path(self.stockfish_path)
-            if not engine_file.exists():
-                raise FileNotFoundError(f"引擎文件不存在: {self.stockfish_path}")
+    def detect_board(self, image=None):
+        """检测棋盘位置"""
+        if image is None:
+            image = self.capture_screen()
+        if image is None:
+            return None
 
-            print(f"正在启动引擎: {self.stockfish_path}")
+        try:
+            gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+            edges = cv2.Canny(gray, 50, 150)
+            contours, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
-            # 使用LCZero引擎（UCI协议兼容）
-            engine = chess.engine.SimpleEngine.popen_uci(self.stockfish_path)
+            best_rect = None
+            best_area = 0
 
-            # 配置LCZero的UCI选项
-            # 这些选项可以提高性能和准确性
-            engine.configure({
-                "Threads": 4,              # 线程数，根据CPU核心数调整
-                "NNCacheSize": 200,       # 神经网络缓存大小(MB)
-                "MaxCollisionEvents": 32,  # 最大碰撞事件
-                "VerboseMoveStats": True,  # 显示详细移动统计
-            })
+            for contour in contours:
+                x, y, w, h = cv2.boundingRect(contour)
+                area = w * h
+                if area > best_area and w > 200 and h > 200:
+                    aspect_ratio = w / float(h)
+                    if 0.8 <= aspect_ratio <= 1.2:
+                        best_area = area
+                        best_rect = (x, y, w, h)
 
-            # LCZero推荐使用nodes而不是depth
-            # nodes=10000表示计算10000个节点，性能越好可以设置越高
-            limit = chess.engine.Limit(nodes=depth * 1000)
-
-            print(f"计算最佳走法 (nodes={limit.nodes})...")
-            result = engine.play(board, limit)
-            engine.close()
-
-            return result.move
-        except FileNotFoundError as e:
-            print(f"错误: {e}")
-            print("\n解决方案:")
-            print("1. 下载LCZero: https://github.com/LeelaChessZero/lc0/releases")
-            print("2. 将lc0.exe放到与chess_bot.py相同的目录下")
-            print("3. 或者修改代码中的引擎路径")
+            if best_rect:
+                x, y, w, h = best_rect
+                self.board_region = {'left': x, 'top': y, 'width': w, 'height': h}
+                self.square_size = w // 8
+                return self.board_region
         except Exception as e:
-            print(f"LCZero引擎错误: {e}")
-            print("提示：请确保已安装LCZero引擎（lc0.exe）并配置正确路径")
-            print("LCZero下载: https://github.com/LeelaChessZero/lc0/releases")
-
+            print(f"棋盘检测失败: {e}")
         return None
 
-    def execute_move(self, move: chess.Move, delay: float = 0.5):
-        """
-        执行移动（通过鼠标点击）
-
-        Args:
-            move: 要执行的移动
-            delay: 点击之间的延迟
-        """
-        try:
-            if not self.board_region:
-                raise ValueError("请先设置棋盘区域")
-
-            square_w, square_h = self.square_size
-            x1 = self.board_region["left"]
-            y1 = self.board_region["top"]
-
-            # 起始格子的中心坐标
-            from_square = move.from_square
-            from_rank = chess.square_rank(from_square)  # 0-7, 从下到上
-            from_file = chess.square_file(from_square)  # 0-7, 从左到右
-
-            from_x = x1 + from_file * square_w + square_w // 2
-            from_y = y1 + (7 - from_rank) * square_h + square_h // 2
-
-            # 目标格子的中心坐标
-            to_square = move.to_square
-            to_rank = chess.square_rank(to_square)
-            to_file = chess.square_file(to_square)
-
-            to_x = x1 + to_file * square_w + square_w // 2
-            to_y = y1 + (7 - to_rank) * square_h + square_h // 2
-
-            # 执行点击
-            print(f"执行移动: {move.uci()}")
-            print(f"点击起点: ({from_x}, {from_y})")
-            print(f"点击终点: ({to_x}, {to_y})")
-
-            # 获取当前鼠标位置（调试）
-            current_mouse = pyautogui.position()
-            print(f"当前鼠标位置: ({current_mouse.x}, {current_mouse.y})")
-
-            # 移动鼠标到起点（动画方式）
-            pyautogui.moveTo(from_x, from_y, duration=0.5)
-            time.sleep(0.3)
-
-            # 点击起点
-            pyautogui.click(from_x, from_y, button='left')
-            print("✓ 已点击起点")
-            time.sleep(delay)
-
-            # 移动鼠标到终点（动画方式）
-            pyautogui.moveTo(to_x, to_y, duration=0.5)
-            time.sleep(0.3)
-
-            # 点击终点
-            pyautogui.click(to_x, to_y, button='left')
-            print("✓ 已点击终点")
-            time.sleep(delay)
-
-            print("✅ 移动执行完成")
-        except Exception as e:
-            print(f"执行移动时出错: {e}")
-            raise
-
-    def calibrate_board(self):
-        """
-        棋盘校准：让用户点击棋盘的四个角
-        """
-        print("=== 棋盘校准 ===")
-        print("请按照提示点击屏幕上的位置...")
-
-        print("1. 请点击棋盘左上角")
+    def manual_select_board(self):
+        """手动框选棋盘区域"""
+        print("\n=== 手动框选棋盘 ===")
+        print("请将鼠标移到棋盘【左上角】，按 Enter 确认")
+        input()
         x1, y1 = pyautogui.position()
-        time.sleep(1)
 
-        print("2. 请点击棋盘右下角")
+        print("请将鼠标移到棋盘【右下角】，按 Enter 确认")
+        input()
         x2, y2 = pyautogui.position()
 
-        self.set_board_region(x1, y1, x2, y2)
-        print("校准完成！")
+        left = max(min(x1, x2), 0)
+        top = max(min(y1, y2), 0)
+        width = abs(x2 - x1)
+        height = abs(y2 - y1)
 
-    def play_move(self, input_mode: str = "auto"):
-        """
-        执行一步AI移动
+        if width < 100 or height < 100:
+            print("区域太小，请重新选择")
+            return self.manual_select_board()
 
-        Args:
-            input_mode: 输入模式 ("auto", "fen", "manual")
-        """
-        if input_mode == "auto":
-            # 自动识别屏幕
-            print("\n正在自动识别棋盘...")
-            try:
-                board = self.scan_board_advanced()
-                print(f"识别的棋局:\n{board}")
-            except Exception as e:
-                print(f"自动识别失败: {e}")
-                print("切换到手动输入模式...")
-                fen = input("请输入FEN字符串: ").strip()
-                try:
-                    board = chess.Board(fen)
-                    print(f"当前棋局:\n{board}")
-                except ValueError as e:
-                    print(f"FEN格式错误: {e}")
-                    return
-        else:
-            # 手动输入
-            fen = input("请输入FEN字符串: ").strip()
-            try:
-                board = chess.Board(fen)
-                print(f"当前棋局:\n{board}")
-            except ValueError as e:
-                print(f"FEN格式错误: {e}")
-                return
+        self.board_region = {'left': left, 'top': top, 'width': width, 'height': height}
+        self.square_size = width // 8
+        print(f"✓ 已选择区域: {self.board_region}")
+        return self.board_region
 
-        # 计算最佳走法
-        move = self.calculate_best_move(board)
+    def get_square_image(self, board_image, square_name):
+        """获取单个格子的图像"""
+        if not self.board_region or not self.square_size:
+            return None
 
-        if move:
-            # 执行移动
-            self.execute_move(move)
-            print(f"AI走棋: {move.uci()}")
-        else:
-            print("无法找到有效走法")
-
-    def save_calibration(self, filepath: str):
-        """
-        保存校准数据
-
-        Args:
-            filepath: 保存路径
-        """
-        calibration_data = {
-            "board_region": self.board_region,
-            "board_size": self.board_size,
-            "square_size": self.square_size
-        }
-
-        with open(filepath, 'wb') as f:
-            pickle.dump(calibration_data, f)
-        print(f"校准数据已保存到: {filepath}")
-
-    def load_calibration(self, filepath: str):
-        """
-        加载校准数据
-
-        Args:
-            filepath: 文件路径
-        """
         try:
-            with open(filepath, 'rb') as f:
-                calibration_data = pickle.load(f)
+            file = ord(square_name[0]) - ord('a')
+            rank = int(square_name[1]) - 1
 
-            self.board_region = calibration_data["board_region"]
-            self.board_size = calibration_data["board_size"]
-            self.square_size = calibration_data["square_size"]
-            print(f"校准数据已加载: {filepath}")
-        except FileNotFoundError:
-            print(f"文件不存在: {filepath}")
+            x = file * self.square_size
+            y = (7 - rank) * self.square_size
+
+            square_img = board_image[y:y+self.square_size, x:x+self.square_size]
+            return square_img
+        except:
+            return None
+
+    def detect_move_by_comparison(self, old_image, new_image):
+        """通过比较两帧图像检测移动"""
+        if old_image is None or new_image is None:
+            return None
+
+        try:
+            diff = cv2.absdiff(old_image, new_image)
+            gray_diff = cv2.cvtColor(diff, cv2.COLOR_BGR2GRAY)
+            _, thresh = cv2.threshold(gray_diff, 30, 255, cv2.THRESH_BINARY)
+
+            changed_squares = []
+
+            for square in chess.SQUARES:
+                square_name = chess.square_name(square)
+                old_sq = self.get_square_image(old_image, square_name)
+                new_sq = self.get_square_image(new_image, square_name)
+
+                if old_sq is not None and new_sq is not None:
+                    sq_diff = cv2.absdiff(old_sq, new_sq)
+                    change_score = np.mean(sq_diff)
+
+                    if change_score > 20:
+                        changed_squares.append(square_name)
+
+            if len(changed_squares) >= 2:
+                for move in self.board.legal_moves:
+                    uci = move.uci()
+                    from_sq = uci[:2]
+                    to_sq = uci[2:4]
+
+                    if from_sq in changed_squares and to_sq in changed_squares:
+                        return uci
+
+            return None
         except Exception as e:
-            print(f"加载校准数据失败: {e}")
+            print(f"检测移动失败: {e}")
+            return None
+
+    def get_square_position(self, square_name):
+        """获取棋格在屏幕上的位置"""
+        if not self.board_region or not self.square_size:
+            return None
+        try:
+            file = ord(square_name[0]) - ord('a')
+            rank = int(square_name[1]) - 1
+            x = self.board_region['left'] + file * self.square_size + self.square_size // 2
+            y = self.board_region['top'] + (7 - rank) * self.square_size + self.square_size // 2
+            return (x, y)
+        except:
+            return None
+
+    def make_move(self, move_uci):
+        """执行移动"""
+        try:
+            from_sq = move_uci[:2]
+            to_sq = move_uci[2:4]
+
+            from_pos = self.get_square_position(from_sq)
+            to_pos = self.get_square_position(to_sq)
+
+            if from_pos and to_pos:
+                print(f"执行移动: {from_sq} -> {to_sq}")
+                pyautogui.click(from_pos[0], from_pos[1])
+                time.sleep(0.3)
+                pyautogui.click(to_pos[0], to_pos[1])
+                time.sleep(0.3)
+
+                if len(move_uci) > 4:
+                    promotion = move_uci[4]
+                    print(f"升变为: {promotion}")
+                    time.sleep(0.5)
+
+                return True
+        except Exception as e:
+            print(f"执行移动失败: {e}")
+        return False
+
+    def get_ai_move(self):
+        """获取AI移动 - 使用 Stockfish 19"""
+        if self.engine:
+            try:
+                # 使用 Stockfish 计算最佳移动
+                # 思考时间1秒，深度20层
+                result = self.engine.play(
+                    self.board,
+                    chess.engine.Limit(time=1.0, depth=20)
+                )
+                move = result.move
+                print(f"Stockfish 评估: 深度20, 思考1秒")
+                return move.uci()
+            except Exception as e:
+                print(f"Stockfish 计算失败: {e}")
+                return self.get_random_move()
+        else:
+            return self.get_random_move()
+
+    def get_random_move(self):
+        """随机移动（备用）"""
+        legal_moves = list(self.board.legal_moves)
+        if not legal_moves:
+            return None
+        move = random.choice(legal_moves)
+        return move.uci()
+
+    def get_ai_analysis(self):
+        """获取AI分析信息"""
+        if self.engine:
+            try:
+                info = self.engine.analyse(
+                    self.board,
+                    chess.engine.Limit(time=0.5)
+                )
+                score = info.get("score")
+                if score:
+                    print(f"当前局面评估: {score}")
+                return info
+            except:
+                pass
+        return None
+
+    def wait_for_opponent_move(self, timeout=60):
+        """等待对手移动并检测"""
+        print("等待对手下棋...")
+        start_time = time.time()
+
+        self.previous_board_image = self.capture_board_region()
+
+        while time.time() - start_time < timeout:
+            time.sleep(0.5)
+
+            current_image = self.capture_board_region()
+            if current_image is None:
+                continue
+
+            move = self.detect_move_by_comparison(self.previous_board_image, current_image)
+
+            if move:
+                try:
+                    chess_move = chess.Move.from_uci(move)
+                    if chess_move in self.board.legal_moves:
+                        print(f"检测到对手移动: {move}")
+                        self.board.push(chess_move)
+                        self.previous_board_image = current_image
+                        return move
+                except:
+                    pass
+
+        print("未检测到对手移动，超时")
+        return None
+
+    def capture_board_region(self):
+        """只截取棋盘区域"""
+        if not self.board_region:
+            return None
+        return self.capture_screen(self.board_region)
+
+    def play_auto(self):
+        """全自动游戏循环"""
+        print("\n" + "="*60)
+        print("=== 全自动模式 (Stockfish 19) ===")
+        print("="*60)
+        print("说明:")
+        print("1. AI会自动检测对手移动")
+        print("2. Stockfish 19 自动计算并执行移动")
+        print("3. 按 Ctrl+C 停止")
+        print("="*60 + "\n")
+
+        # 初始化引擎
+        self.init_engine()
+
+        move_count = 0
+
+        try:
+            while not self.board.is_game_over():
+                print(f"\n--- 第 {move_count + 1} 回合 ---")
+
+                if self.board.turn == self.player_color:
+                    print("Stockfish 思考中...")
+
+                    # 获取分析信息
+                    self.get_ai_analysis()
+
+                    ai_move = self.get_ai_move()
+                    if ai_move:
+                        print(f"Stockfish 选择: {ai_move}")
+
+                        if self.make_move(ai_move):
+                            self.board.push(chess.Move.from_uci(ai_move))
+                            move_count += 1
+                            print("✓ 移动完成")
+                        else:
+                            print("✗ 移动失败")
+                            break
+                    else:
+                        print("没有合法移动")
+                        break
+                else:
+                    opponent_move = self.wait_for_opponent_move()
+                    if opponent_move:
+                        print(f"✓ 对手移动: {opponent_move}")
+                    else:
+                        print("未检测到对手移动，请手动输入")
+                        manual = input("输入对手移动 (如e2e4) 或按Enter跳过: ").strip()
+                        if manual:
+                            try:
+                                move = chess.Move.from_uci(manual)
+                                if move in self.board.legal_moves:
+                                    self.board.push(move)
+                                else:
+                                    print("非法移动")
+                            except:
+                                print("格式错误")
+
+                self.previous_board_image = self.capture_board_region()
+                time.sleep(1)
+
+            print("\n" + "="*60)
+            print("游戏结束!")
+            print(f"结果: {self.board.result()}")
+            print(f"总回合数: {move_count}")
+            print("="*60)
+
+        except KeyboardInterrupt:
+            print("\n\n游戏已停止")
+            print(f"进行了 {move_count} 回合")
+
+    def run(self):
+        """主运行循环"""
+        print("="*60)
+        print("=== 国际象棋机器人 (Stockfish 19) ===")
+        print("="*60)
+
+        print("\n请选择模式:")
+        print("1. 自动识别屏幕棋盘（默认）")
+        print("2. 手动框选棋盘区域")
+
+        mode = input("\n请选择 (1/2, 默认1): ").strip() or "1"
+
+        if mode == "1":
+            print("\n=== 自动识别棋盘 ===")
+            print("【重要】请在5秒内切换到浏览器页面...")
+            for i in range(5, 0, -1):
+                print(f"  {i}...")
+                time.sleep(1)
+            print("  截图中!")
+
+            region = self.detect_board()
+            if region:
+                print(f"✓ 识别成功: {region}")
+            else:
+                print("✗ 自动识别失败，切换到手动框选...")
+                self.manual_select_board()
+        elif mode == "2":
+            self.manual_select_board()
+        else:
+            print("无效选择")
+            return
+
+        print("\n=== 准备就绪 ===")
+        print(f"棋盘区域: {self.board_region}")
+        print(f"格子大小: {self.square_size}")
+
+        color = input("\n选择你的颜色 (w/b, 默认w): ").strip().lower() or "w"
+        self.player_color = chess.WHITE if color == "w" else chess.BLACK
+        print(f"你是: {'白方' if self.player_color == chess.WHITE else '黑方'}")
+
+        self.play_auto()
+
+    def __del__(self):
+        """清理资源"""
+        if self.engine:
+            try:
+                self.engine.quit()
+            except:
+                pass
+        if self.sct:
+            try:
+                self.sct.close()
+            except:
+                pass
 
 
 def main():
-    """主程序"""
-    print("=" * 70)
-    print("  国际象棋自动对弈机器人")
-    print("  支持自动识别屏幕棋盘")
-    print("=" * 70)
-
-    # 自动查找引擎
-    # - 如果lc0.exe在同目录，自动使用
-    # - 否则使用PATH中的lc0
-    # - 如需自定义，可以传入完整路径，例如：
-    #   engine_path = "C:/Users/YourName/Downloads/lc0-v0.32.1-windows-cpu-dnnl/lc0.exe"
-
-    bot = ChessBot()  # 自动检测引擎路径
-
-    # 检查是否已保存校准数据
-    calib_file = Path(__file__).parent / "calibration.pkl"
-
-    if calib_file.exists():
-        print("\n找到已保存的校准数据")
-        bot.load_calibration(str(calib_file))
-    else:
-        # 选择校准方式
-        print("\n请选择棋盘校准方式:")
-        print("1. 手动校准（点击棋盘四角）")
-        print("2. 自动检测（尝试自动识别棋盘）")
-
-        choice = input("请输入选择 (1/2): ").strip()
-
-        if choice == "1":
-            print("\n请点击棋盘左上角...")
-            x1, y1 = pyautogui.position()
-            time.sleep(1)
-
-            print("请点击棋盘右下角...")
-            x2, y2 = pyautogui.position()
-
-            bot.set_board_region(x1, y1, x2, y2)
-            bot.save_calibration(str(calib_file))
-        elif choice == "2":
-            if not bot.detect_board_automatically():
-                print("自动检测失败，请手动校准")
-                print("\n请点击棋盘左上角...")
-                x1, y1 = pyautogui.position()
-                time.sleep(1)
-
-                print("请点击棋盘右下角...")
-                x2, y2 = pyautogui.position()
-
-                bot.set_board_region(x1, y1, x2, y2)
-                bot.save_calibration(str(calib_file))
-
-    # 测试棋盘捕获
-    print("\n测试棋盘捕获...")
-    try:
-        board_img = bot.capture_board()
-        preview_path = Path(__file__).parent / "board_preview.png"
-        cv2.imwrite(str(preview_path), board_img)
-        print(f"棋盘预览已保存: {preview_path}")
-
-        # 测试识别
-        print("\n测试棋盘识别...")
-        test_board = bot.scan_board_advanced()
-        print(f"测试识别完成，棋盘状态:\n{test_board}")
-    except Exception as e:
-        print(f"测试失败: {e}")
-        print("提示：确保棋盘可见且已正确校准")
-
-    print("\n" + "=" * 70)
-
-    # 主循环
-    print("\n=== 开始对弈 ===")
-    print("提示：按 Ctrl+C 停止程序\n")
-
-    print("使用模式:")
-    print("  1. 自动识别屏幕棋盘（默认）")
-    print("  2. 手动输入FEN字符串")
-
-    mode_choice = input("\n请选择模式 (1/2, 默认1): ").strip()
-    auto_mode = mode_choice != '2'
-
-    try:
-        while True:
-            # 识别棋盘
-            print("=== 识别棋盘 ===")
-
-            if auto_mode:
-                # 自动识别
-                print("正在识别屏幕棋盘...")
-                try:
-                    current_board = bot.scan_board_advanced()
-                    print(f"识别的棋局:\n{current_board}")
-                except Exception as e:
-                    print(f"自动识别失败: {e}")
-                    print("切换到手动输入模式...")
-                    fen = input("请输入FEN字符串: ").strip()
-                    try:
-                        current_board = chess.Board(fen)
-                        print(f"当前棋局:\n{current_board}")
-                    except ValueError as e:
-                        print(f"FEN格式错误: {e}")
-                        continue
-            else:
-                # 手动输入FEN
-                fen = input("请输入FEN字符串 (或输入 'auto' 切换到自动识别): ").strip()
-
-                if fen.lower() == 'auto':
-                    auto_mode = True
-                    print("切换到自动识别模式")
-                    continue
-
-                try:
-                    current_board = chess.Board(fen)
-                    print(f"当前棋局:\n{current_board}")
-                except ValueError as e:
-                    print(f"FEN格式错误: {e}")
-                    continue
-
-            # 检查游戏是否结束
-            if current_board.is_game_over():
-                print(f"游戏结束！结果: {current_board.result()}")
-                break
-
-            # AI走棋
-            print("\n=== AI思考中 ===")
-            try:
-                ai_move = bot.calculate_best_move(current_board)
-            except Exception as e:
-                print(f"计算最佳走法失败: {e}")
-                input("按Enter重试...")
-                continue
-
-            if ai_move:
-                print(f"AI推荐走法: {ai_move.uci()}")
-
-                # 直接自动执行移动
-                try:
-                    bot.execute_move(ai_move)
-                    print("✅ 移动已自动执行")
-                except Exception as e:
-                    print(f"❌ 执行移动失败: {e}")
-                    print("提示：请手动执行移动，或在chess.com/lichess.org上操作")
-
-                # 模拟AI移动（为了下一轮识别）
-                try:
-                    current_board.push(ai_move)
-                except Exception as e:
-                    print(f"更新棋盘状态失败: {e}")
-
-                # 检查游戏是否结束
-                if current_board.is_game_over():
-                    print(f"\n游戏结束！结果: {current_board.result()}")
-                    break
-            else:
-                print("AI无法找到有效走法")
-                input("按Enter继续...")
-                continue
-
-            print("\n" + "=" * 60)
-            print("等待对手走棋，然后按Enter继续...")
-            input()
-
-    except KeyboardInterrupt:
-        print("\n\n程序已停止")
-    except Exception as e:
-        print(f"\n\n程序出错: {e}")
-        import traceback
-        traceback.print_exc()
+    bot = ChessBot()
+    bot.run()
 
 
 if __name__ == "__main__":

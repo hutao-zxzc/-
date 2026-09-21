@@ -10,7 +10,7 @@
 # Stockfish引擎路径
 # Linux/macOS: 通常在PATH中，可以直接用 "stockfish"
 # Windows: 如果不在PATH中，指定完整路径，如 r"C:\Program Files\stockfish\stockfish.exe"
-STOCKFISH_PATH = "stockfish"
+STOCKFISH_PATH = "C:\Users\12991\Desktop\stockfish\stockfish-windows-x86-64-universal.exe"f
 
 # ========================================
 # AI配置
