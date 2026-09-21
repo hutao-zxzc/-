@@ -1,0 +1,110 @@
+# LCZero 引擎配置文件
+# 根据你的硬件性能调整这些参数
+
+## 线程数设置
+Threads = 4
+# 建议：CPU核心数 - 1
+# 例如：8核CPU使用6-7线程
+# 4核CPU使用3-4线程
+
+## 神经网络缓存大小 (MB)
+NNCacheSize = 200
+# 建议：200-1000 MB
+# 内存充足可以设置更高
+
+## 最大碰撞事件
+MaxCollisionEvents = 32
+# 建议保持默认值
+
+## 搜索参数
+# 这些参数影响计算速度和棋力
+
+### 计算节点数 (在代码中设置)
+# 推荐：
+# - 快速测试：1000-5000 nodes
+# - 正常对弈：10000-50000 nodes
+# - 深度计算：100000+ nodes
+
+### 时间限制 (可选)
+# 可以在代码中使用 chess.engine.Limit(time=10.0)
+# time=10.0 表示最多计算10秒
+
+## 神经网络权重文件
+# LCZero会自动查找同目录下的 .pb.gz 或 .pb 文件
+# 你可以指定特定权重：
+# lc0.exe --weights=your-network.pb.gz
+
+## GPU 加速 (如果有NVIDIA显卡)
+# 下载 CUDA 版本的 lc0.exe
+# 设置 Threads=0 (使用GPU)
+# 设置 Backend=cuda
+
+## 性能优化建议
+
+### 1. 测试最佳配置
+从低参数开始，逐步增加：
+- 先用 1000 nodes, Threads=2
+- 如果速度足够，增加到 5000 nodes, Threads=4
+- 根据结果继续调整
+
+### 2. 监控性能
+观察以下指标：
+- NPS (Nodes Per Second) - 每秒计算的节点数
+- 计算时间
+- 棋力提升效果
+
+### 3. 典型配置示例
+
+#### 低配置笔记本 (4核CPU)
+Threads = 3
+NNCacheSize = 100
+nodes = 1000-2000
+
+#### 中等配置 (8核CPU)
+Threads = 6
+NNCacheSize = 300
+nodes = 5000-10000
+
+#### 高配置 (16核+CPU / GPU)
+Threads = 12
+NNCacheSize = 500
+nodes = 10000-50000
+
+## 常见问题
+
+### Q: 引擎启动很慢
+A: 可能是权重文件加载慢，尝试：
+- 使用更小的权重文件
+- 增加 NNCacheSize
+- 将权重文件放在SSD上
+
+### Q: 计算速度太慢
+A: 降低这些参数：
+- 减少 Threads
+- 减少 nodes
+- 减少 NNCacheSize
+
+### Q: 棋力不够强
+A: 增加这些参数：
+- 增加 nodes
+- 使用更大的权重文件
+- 如果有GPU，使用CUDA版本
+
+## 权重文件推荐
+
+### 快速/低配置
+- 256x20 网络 - 较小，速度快
+- 权重在 ~50MB 左右
+
+### 平衡性能
+- 256x20 或 384x24 网络
+- 权重在 ~100-200MB
+
+### 最强棋力
+- 384x24 或更大网络
+- 需要 GPU 加速
+- 权重在 ~500MB+
+
+## 更多信息
+- LCZero GitHub: https://github.com/LeelaChessZero/lc0
+- 权重下载: https://lczero.org/play/networks/
